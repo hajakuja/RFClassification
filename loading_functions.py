@@ -10,6 +10,7 @@ import pandas as pd
 import cv2
 import time
 from scipy import interpolate
+from itertools import zip_longest
 
 ### 1. DRONEDETECT Dataset ###
 
@@ -363,6 +364,128 @@ def load_dronerf_raw(main_folder, t_seg):
     y4s_arr = np.array(y4s).flatten()
     y10s_arr = np.array(y10s).flatten()
     return Xs_arr, ys_arr, y4s_arr, y10s_arr
+
+
+def iter_dronerf_segments(
+    main_folder,
+    t_seg,
+    chunk_size_samples=None,
+    dtype=np.float32,
+):
+    """Yield DroneRF segments without materializing the entire dataset.
+
+    Parameters
+    ----------
+    main_folder : str
+        Root directory for the DroneRF dataset that contains ``High`` and ``Low`` subfolders.
+    t_seg : float
+        Segment duration in milliseconds. Each yielded segment spans this duration.
+    chunk_size_samples : int, optional
+        Number of samples to read from disk per chunk for each channel. Larger chunks
+        reduce the number of concatenations but increase peak memory usage. If ``None``
+        the value defaults to four segments worth of samples.
+    dtype : numpy.dtype, optional
+        Data type for the loaded samples. ``np.float32`` keeps memory usage low while
+        matching the precision used elsewhere in the project.
+
+    Yields
+    ------
+    dict
+        Each yielded dictionary contains the stacked high/low segment under ``segment``
+        (shape ``(2, len_seg)``) along with metadata keys ``bi_label`` (binary label),
+        ``four_label`` (four-class label), ``ten_label`` (ten-class label),
+        ``file_index`` (index of the capture file), ``segment_index`` (sequential index
+        within the file), and ``filenames`` (dictionary with ``high``/``low`` entries).
+
+    Notes
+    -----
+    This streaming interface avoids the large intermediate arrays created by
+    :func:`load_dronerf_raw` and is suitable for memory-constrained environments such as
+    Google Colab.
+    """
+
+    high_dir = os.path.join(main_folder, "High")
+    low_dir = os.path.join(main_folder, "Low")
+
+    high_freq_files = os.listdir(high_dir)
+    low_freq_files = os.listdir(low_dir)
+
+    high_freq_files.sort()
+    low_freq_files.sort()
+
+    fs = 40e6  # 40 MHz
+    len_seg = int(t_seg / 1e3 * fs)
+    if chunk_size_samples is None:
+        chunk_size_samples = len_seg * 4
+
+    if len(high_freq_files) != len(low_freq_files):
+        raise ValueError("High/Low directories contain a different number of files")
+
+    for file_index, (high_file, low_file) in enumerate(zip(high_freq_files, low_freq_files)):
+        high_path = os.path.join(high_dir, high_file)
+        low_path = os.path.join(low_dir, low_file)
+
+        # Prepare iterators that read the CSV files in manageable pieces.
+        high_iter = pd.read_csv(high_path, header=None, chunksize=chunk_size_samples)
+        low_iter = pd.read_csv(low_path, header=None, chunksize=chunk_size_samples)
+
+        remainder_high = np.empty((0,), dtype=dtype)
+        remainder_low = np.empty((0,), dtype=dtype)
+        segment_index = 0
+
+        for chunk_high, chunk_low in zip_longest(high_iter, low_iter):
+            if chunk_high is None or chunk_low is None:
+                raise ValueError(
+                    f"Mismatched chunk counts for High/Low files: {high_file}, {low_file}"
+                )
+
+            high_values = chunk_high.values.reshape(-1).astype(dtype, copy=False)
+            low_values = chunk_low.values.reshape(-1).astype(dtype, copy=False)
+
+            buffer_high = np.concatenate((remainder_high, high_values))
+            buffer_low = np.concatenate((remainder_low, low_values))
+
+            if buffer_high.shape[0] != buffer_low.shape[0]:
+                raise ValueError(
+                    f"High/Low buffers have different lengths in file {low_file}"
+                )
+
+            cursor = 0
+            total_samples = buffer_high.shape[0]
+            while total_samples - cursor >= len_seg:
+                segment_high = buffer_high[cursor : cursor + len_seg].astype(dtype, copy=False)
+                segment_low = buffer_low[cursor : cursor + len_seg].astype(dtype, copy=False)
+
+                segment = np.vstack((segment_high, segment_low))
+
+                record = {
+                    "segment": segment,
+                    "bi_label": int(low_file[0]),
+                    "four_label": int(low_file[:3]),
+                    "ten_label": int(low_file[:5]),
+                    "file_index": file_index,
+                    "segment_index": segment_index,
+                    "filenames": {"high": high_file, "low": low_file},
+                }
+
+                yield record
+
+                cursor += len_seg
+                segment_index += 1
+
+            # Preserve leftovers that were not large enough to form a complete segment.
+            if cursor >= total_samples:
+                remainder_high = np.empty((0,), dtype=dtype)
+                remainder_low = np.empty((0,), dtype=dtype)
+            else:
+                remainder_high = buffer_high[cursor:].astype(dtype, copy=False)
+                remainder_low = buffer_low[cursor:].astype(dtype, copy=False)
+
+        if remainder_high.size or remainder_low.size:
+            # Leftover samples should be shorter than a full segment; they are dropped to
+            # mirror the behaviour of the original loader.
+            remainder_high = np.empty((0,), dtype=dtype)
+            remainder_low = np.empty((0,), dtype=dtype)
 
 ## method to normalize for rfuav-net - *Note in original paper - they normalized across all drones
 def normalize_rf(rf):
