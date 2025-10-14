@@ -372,6 +372,7 @@ def iter_dronerf_segments(
     t_seg,
     chunk_size_samples=None,
     dtype=np.float32,
+    skip_segments=0,
 ):
     """Yield DroneRF segments without materializing the entire dataset.
 
@@ -388,6 +389,10 @@ def iter_dronerf_segments(
     dtype : numpy.dtype, optional
         Data type for the loaded samples. ``np.float32`` keeps memory usage low while
         matching the precision used elsewhere in the project.
+    skip_segments : int, optional
+        Number of leading segments to drop from the stream before yielding results.
+        This is used by long-running feature extraction jobs that resume after a
+        partial run so they can fast-forward to the first unprocessed segment.
 
     Yields
     ------
@@ -453,6 +458,8 @@ def iter_dronerf_segments(
     if chunk_size_samples is None:
         chunk_size_samples = len_seg * 4
 
+    skipped_segments = 0
+
     for file_index, key in enumerate(shared_keys):
         high_entries = high_map[key]
         low_entries = low_map[key]
@@ -499,19 +506,22 @@ def iter_dronerf_segments(
                 segment_high = buffer_high[cursor : cursor + len_seg].astype(dtype, copy=False)
                 segment_low = buffer_low[cursor : cursor + len_seg].astype(dtype, copy=False)
 
-                segment = np.vstack((segment_high, segment_low))
+                if skipped_segments < skip_segments:
+                    skipped_segments += 1
+                else:
+                    segment = np.vstack((segment_high, segment_low))
 
-                record = {
-                    "segment": segment,
-                    "bi_label": int(low_file[0]),
-                    "four_label": int(low_file[:3]),
-                    "ten_label": int(low_file[:5]),
-                    "file_index": file_index,
-                    "segment_index": segment_index,
-                    "filenames": {"high": high_file, "low": low_file},
-                }
+                    record = {
+                        "segment": segment,
+                        "bi_label": int(low_file[0]),
+                        "four_label": int(low_file[:3]),
+                        "ten_label": int(low_file[:5]),
+                        "file_index": file_index,
+                        "segment_index": segment_index,
+                        "filenames": {"high": high_file, "low": low_file},
+                    }
 
-                yield record
+                    yield record
 
                 cursor += len_seg
                 segment_index += 1
