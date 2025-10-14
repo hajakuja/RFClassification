@@ -32,6 +32,10 @@ chunk_size_samples = samples_per_segment * 4  # four segments per read (~memory/
 segments_per_batch = 64  # how many segments to accumulate before flushing to disk
 stream_dtype = np.float32
 
+# Resume helpers for notebook environments
+resume_existing_progress = True  # set False to recompute from scratch
+reset_existing_progress = False  # set True to ignore any detected progress
+
 n_per_seg = 1024 # length of each segment (powers of 2)
 n_overlap_spec = 120
 win_type = 'hamming' # make ends of each segment match
@@ -134,6 +138,103 @@ else:
         f'and segments_per_batch={segments_per_batch}'
     )
 
+    def infer_saved_array_progress(folder_path, descriptor):
+        if not os.path.isdir(folder_path):
+            return None
+
+        records = []
+        for name in os.listdir(folder_path):
+            if not name.lower().endswith('.npy'):
+                continue
+            try:
+                batch_idx = int(name.rsplit('_', 1)[-1].split('.')[0])
+            except ValueError:
+                continue
+
+            file_path = os.path.join(folder_path, name)
+            try:
+                payload = np.load(file_path, allow_pickle=True).item()
+                feat = payload.get('feat')
+                seg_count = len(feat) if feat is not None else 0
+            except Exception as exc:
+                print(f"Warning: unable to inspect '{file_path}' while inferring progress ({exc})")
+                continue
+
+            records.append((batch_idx, seg_count))
+
+        if not records:
+            return None
+
+        records.sort()
+        processed = sum(seg_count for _, seg_count in records)
+        next_batch = records[-1][0] + 1
+        return {"source": descriptor, "processed_segments": processed, "next_batch_index": next_batch}
+
+    def infer_saved_image_progress(folder_path, descriptor):
+        if not os.path.isdir(folder_path):
+            return None
+
+        unique_positions = set()
+        for name in os.listdir(folder_path):
+            if not name.lower().endswith('.jpg'):
+                continue
+            parts = name[:-4].split('_')
+            if len(parts) < 3:
+                continue
+            try:
+                group_counter = int(parts[-2])
+                count_in_group = int(parts[-1])
+            except ValueError:
+                continue
+            unique_positions.add((group_counter, count_in_group))
+
+        if not unique_positions:
+            return None
+
+        processed = len(unique_positions)
+        next_batch = max(group for group, _ in unique_positions) + 1
+        return {"source": descriptor, "processed_segments": processed, "next_batch_index": next_batch}
+
+    def gather_resume_state():
+        candidates = []
+
+        if sa_save:
+            info = infer_saved_array_progress(features_folder + arr_spec_folder, "SPEC arrays")
+            if info:
+                candidates.append(info)
+        if pa_save:
+            info = infer_saved_array_progress(features_folder + arr_psd_folder, "PSD arrays")
+            if info:
+                candidates.append(info)
+        if raw_save:
+            info = infer_saved_array_progress(features_folder + raw_folder, "RAW arrays")
+            if info:
+                candidates.append(info)
+        if si_save:
+            info = infer_saved_image_progress(os.path.join(features_folder, img_spec_folder), "SPEC images")
+            if info:
+                candidates.append(info)
+        if pi_save:
+            info = infer_saved_image_progress(os.path.join(features_folder, img_psd_folder), "PSD images")
+            if info:
+                candidates.append(info)
+
+        if not candidates:
+            return None
+
+        max_processed = max(info["processed_segments"] for info in candidates)
+        top_candidates = [info for info in candidates if info["processed_segments"] == max_processed]
+        resume_from = top_candidates[0]
+
+        if len(top_candidates) > 1 or len({info["processed_segments"] for info in candidates}) > 1:
+            sources = ", ".join(f"{info['source']} ({info['processed_segments']})" for info in candidates)
+            print(
+                "Detected differing progress markers across outputs; using the largest count. "
+                f"Details: {sources}"
+            )
+
+        return resume_from
+
     def flush_batch(batch_idx, BILABEL, DRONELABEL, MODELALBEL, F_SPEC, F_PSD, F_V):
         if not BILABEL:
             return BILABEL, DRONELABEL, MODELALBEL, F_SPEC, F_PSD, F_V
@@ -183,7 +284,23 @@ else:
     F_SPEC = []
     F_V = []
 
-    batch_index = 0
+    resume_state = None
+    processed_segments = 0
+
+    if reset_existing_progress:
+        print("Reset flag enabled: ignoring any existing outputs. Be careful of name collisions.")
+    elif resume_existing_progress:
+        resume_state = gather_resume_state()
+        if resume_state:
+            processed_segments = resume_state["processed_segments"]
+            print(
+                "Resuming from previously saved progress provided by "
+                f"{resume_state['source']}: skipping {processed_segments} segments"
+            )
+        else:
+            print("No existing progress detected; starting from the first segment.")
+
+    batch_index = resume_state["next_batch_index"] if resume_state else 0
     count_in_batch = 0
 
     segment_iterator = iter_dronerf_segments(
@@ -191,6 +308,7 @@ else:
         t_seg,
         chunk_size_samples=chunk_size_samples,
         dtype=stream_dtype,
+        skip_segments=processed_segments,
     )
 
     for record in tqdm(segment_iterator, desc='Generating DroneRF features', unit='seg'):
