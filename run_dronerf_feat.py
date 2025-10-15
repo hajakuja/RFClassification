@@ -588,9 +588,10 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     compute_features = partial(_compute_features, cfg=cfg)
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        for result in executor.map(compute_features, segment_iterator, chunksize=1):
-            batch_position = count_in_batch
-            process_segment(result, batch_position)
+        for batch in batched(segment_iterator, segments_per_batch):
+            batch_start = count_in_batch
+            for idx, result in enumerate(executor.map(compute_features, batch)):
+                process_segment(result, batch_start + idx)
 
     if count_in_batch or BILABEL:
         segments_in_flush = count_in_batch
