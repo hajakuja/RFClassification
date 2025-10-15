@@ -3,7 +3,8 @@
 import argparse
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 from dataclasses import dataclass
 from itertools import islice
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -327,7 +328,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     max_workers = args.max_workers if args.max_workers and args.max_workers > 0 else max_workers_default
     if max_workers in (None, 0):
         max_workers = os.cpu_count() or 1
-    print(f"Using {max_workers} worker thread(s) for feature extraction")
+    print(f"Using {max_workers} worker process(es) for feature extraction")
 
     cfg = ExtractionConfig(
         fs=fs,
@@ -595,10 +596,11 @@ def main(argv: Optional[List[str]] = None) -> None:
             batch_index = batch_idx_next
             count_in_batch = 0
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    compute_features = partial(_compute_features, cfg=cfg)
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
         for batch in batched(segment_iterator, segments_per_batch):
             batch_start = count_in_batch
-            for idx, result in enumerate(executor.map(lambda rec: _compute_features(rec, cfg), batch)):
+            for idx, result in enumerate(executor.map(compute_features, batch)):
                 process_segment(result, batch_start + idx)
 
     if count_in_batch or BILABEL:
