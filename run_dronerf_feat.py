@@ -6,8 +6,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from dataclasses import dataclass
-from itertools import islice
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from numpy import sum,isrealobj,sqrt
@@ -38,7 +37,7 @@ samples_per_segment = int(t_seg/1e3*fs)
 chunk_size_samples = samples_per_segment * 4  # four segments per read (~memory/perf tradeoff)
 segments_per_batch = 64  # how many segments to accumulate before flushing to disk
 stream_dtype = np.float32
-max_workers_default: Optional[int] = None  # None lets ThreadPoolExecutor decide
+max_workers_default: Optional[int] = None  # None lets ProcessPoolExecutor default to cpu_count
 
 # Resume helpers for notebook environments
 resume_existing_progress = True  # set False to recompute from scratch
@@ -109,7 +108,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--max-workers",
         type=int,
         default=max_workers_default,
-        help="Number of worker threads to use (default: auto)",
+        help="Number of worker processes to use (default: auto)",
     )
     parser.add_argument(
         "--log-interval",
@@ -124,15 +123,6 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Emit a warning when an individual step exceeds this duration in seconds.",
     )
     return parser.parse_args(argv)
-
-
-def batched(iterable: Iterable[Any], batch_size: int) -> Iterable[List[Any]]:
-    iterator = iter(iterable)
-    while True:
-        batch = list(islice(iterator, batch_size))
-        if not batch:
-            break
-        yield batch
 
 
 def _compute_features(record: Dict[str, Any], cfg: ExtractionConfig) -> SegmentResult:
