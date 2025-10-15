@@ -4,6 +4,7 @@ import numpy as np
 from scipy import interpolate
 import matplotlib.pyplot as plt
 from helper_functions import *
+from matplotlib.figure import Figure
 
 ## DRONEDETECT - DATA SAVING FUNCTIONS
 def interpolate_2d(Sxx_in, output_size):
@@ -74,10 +75,15 @@ def save_array_rf(folder_path, feat, BI, DRONES, MODES, feat_name, n_per_seg, se
     
     
 def save_psd_image_rf(folder_path, cond_folder, BUI, group_counter, count, PSD, dim_px, dpi):
-    fig = plot_feat(PSD, dim_px, dpi, to_show=False, show_axis=False)
+    if isinstance(PSD, Figure):
+        fig = PSD
+    else:
+        fig = plot_feat(PSD, dim_px, dpi, to_show=False, show_axis=False)
     bui_string = str(BUI).zfill(5)
     full_img_path = folder_path+"/"+cond_folder+"/"+bui_string+'_'+str(group_counter)+'_'+str(count)+'.jpg'
-    fig.savefig(full_img_path)
+    fig.savefig(full_img_path, dpi=dpi)
+    plt.close(fig)
+    plt.clf()
     
 def save_spec_image_fig_rf(folder_path, cond_folder, BUI, group_counter, count, fig, dpi):
     bui_string = str(BUI).zfill(5)
