@@ -3,10 +3,10 @@
 import argparse
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 from dataclasses import dataclass
-from itertools import islice
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import numpy as np
 from numpy import sum,isrealobj,sqrt
@@ -25,6 +25,26 @@ from loading_functions import *
 from file_paths import *
 from feat_gen_functions import *
 
+def batched(iterable: Iterable[Any], n: int) -> Iterator[List[Any]]:
+    """Yield lists of *n* items from *iterable* until the input is exhausted.
+
+    Python's :func:`itertools.batched` is only available starting in Python 3.12.
+    Define a small local helper so existing code paths that previously relied on
+    that symbol remain functional when the stdlib helper is unavailable.
+    """
+
+    if n <= 0:
+        raise ValueError("batch size must be positive")
+
+    batch: List[Any] = []
+    for item in iterable:
+        batch.append(item)
+        if len(batch) == n:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
 import importlib
 
 # Dataset Info
@@ -37,7 +57,7 @@ samples_per_segment = int(t_seg/1e3*fs)
 chunk_size_samples = samples_per_segment * 4  # four segments per read (~memory/perf tradeoff)
 segments_per_batch = 64  # how many segments to accumulate before flushing to disk
 stream_dtype = np.float32
-max_workers_default: Optional[int] = None  # None lets ThreadPoolExecutor decide
+max_workers_default: Optional[int] = None  # None lets ProcessPoolExecutor default to cpu_count
 
 # Resume helpers for notebook environments
 resume_existing_progress = True  # set False to recompute from scratch
@@ -108,7 +128,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "--max-workers",
         type=int,
         default=max_workers_default,
-        help="Number of worker threads to use (default: auto)",
+        help="Number of worker processes to use (default: auto)",
     )
     parser.add_argument(
         "--log-interval",
@@ -123,15 +143,6 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Emit a warning when an individual step exceeds this duration in seconds.",
     )
     return parser.parse_args(argv)
-
-
-def batched(iterable: Iterable[Any], batch_size: int) -> Iterable[List[Any]]:
-    iterator = iter(iterable)
-    while True:
-        batch = list(islice(iterator, batch_size))
-        if not batch:
-            break
-        yield batch
 
 
 def _compute_features(record: Dict[str, Any], cfg: ExtractionConfig) -> SegmentResult:
@@ -327,7 +338,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     max_workers = args.max_workers if args.max_workers and args.max_workers > 0 else max_workers_default
     if max_workers in (None, 0):
         max_workers = os.cpu_count() or 1
-    print(f"Using {max_workers} worker thread(s) for feature extraction")
+    print(f"Using {max_workers} worker process(es) for feature extraction")
 
     cfg = ExtractionConfig(
         fs=fs,
@@ -595,11 +606,11 @@ def main(argv: Optional[List[str]] = None) -> None:
             batch_index = batch_idx_next
             count_in_batch = 0
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for batch in batched(segment_iterator, segments_per_batch):
-            batch_start = count_in_batch
-            for idx, result in enumerate(executor.map(lambda rec: _compute_features(rec, cfg), batch)):
-                process_segment(result, batch_start + idx)
+    compute_features = partial(_compute_features, cfg=cfg)
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        for result in executor.map(compute_features, segment_iterator, chunksize=1):
+            batch_position = count_in_batch
+            process_segment(result, batch_position)
 
     if count_in_batch or BILABEL:
         segments_in_flush = count_in_batch
