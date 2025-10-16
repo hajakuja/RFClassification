@@ -25,10 +25,7 @@ from loading_functions import *
 from file_paths import *
 from feat_gen_functions import *
 
-T = TypeVar("T")
-
-
-def batched(iterable: Iterable[T], n: int) -> Iterator[List[T]]:
+def batched(iterable: Iterable[Any], n: int) -> Iterator[List[Any]]:
     """Yield lists of *n* items from *iterable* until the input is exhausted.
 
     Python's :func:`itertools.batched` is only available starting in Python 3.12.
@@ -39,7 +36,7 @@ def batched(iterable: Iterable[T], n: int) -> Iterator[List[T]]:
     if n <= 0:
         raise ValueError("batch size must be positive")
 
-    batch: List[T] = []
+    batch: List[Any] = []
     for item in iterable:
         batch.append(item)
         if len(batch) == n:
