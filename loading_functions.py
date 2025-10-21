@@ -1,6 +1,5 @@
 from torch.utils.data import Dataset
 import os
-import warnings
 from tqdm import tqdm
 import numpy as np
 from helper_functions import *
@@ -408,63 +407,21 @@ def iter_dronerf_segments(
     high_dir = os.path.join(main_folder, "High")
     low_dir = os.path.join(main_folder, "Low")
 
-    high_freq_files = sorted(
-        fi for fi in os.listdir(high_dir) if fi.lower().endswith(".csv")
-    )
-    low_freq_files = sorted(
-        fi for fi in os.listdir(low_dir) if fi.lower().endswith(".csv")
-    )
+    high_freq_files = os.listdir(high_dir)
+    low_freq_files = os.listdir(low_dir)
 
-    def _normalise_name(filename):
-        name_parts = filename.split("_", 1)
-        if len(name_parts) != 2:
-            return filename
-        prefix, suffix = name_parts
-        if prefix.endswith("H") or prefix.endswith("L"):
-            prefix = prefix[:-1]
-        return f"{prefix}_{suffix}"
-
-    high_map = {}
-    for fi in high_freq_files:
-        high_map.setdefault(_normalise_name(fi), []).append(fi)
-
-    low_map = {}
-    for fi in low_freq_files:
-        low_map.setdefault(_normalise_name(fi), []).append(fi)
-
-    shared_keys = sorted(set(high_map) & set(low_map))
-    missing_high = sorted(set(low_map) - set(high_map))
-    missing_low = sorted(set(high_map) - set(low_map))
-
-    if missing_high:
-        warnings.warn(
-            "Skipping Low files with no High counterpart: " + ", ".join(missing_high)
-        )
-    if missing_low:
-        warnings.warn(
-            "Skipping High files with no Low counterpart: " + ", ".join(missing_low)
-        )
-
-    if not shared_keys:
-        raise ValueError("No matching High/Low file pairs found in the provided folders")
+    high_freq_files.sort()
+    low_freq_files.sort()
 
     fs = 40e6  # 40 MHz
     len_seg = int(t_seg / 1e3 * fs)
     if chunk_size_samples is None:
         chunk_size_samples = len_seg * 4
 
-    for file_index, key in enumerate(shared_keys):
-        high_entries = high_map[key]
-        low_entries = low_map[key]
+    if len(high_freq_files) != len(low_freq_files):
+        raise ValueError("High/Low directories contain a different number of files")
 
-        if len(high_entries) != 1 or len(low_entries) != 1:
-            raise ValueError(
-                "Unable to uniquely match High/Low files for identifier "
-                f"'{key}': {high_entries} vs {low_entries}"
-            )
-
-        high_file = high_entries[0]
-        low_file = low_entries[0]
+    for file_index, (high_file, low_file) in enumerate(zip(high_freq_files, low_freq_files)):
         high_path = os.path.join(high_dir, high_file)
         low_path = os.path.join(low_dir, low_file)
 
