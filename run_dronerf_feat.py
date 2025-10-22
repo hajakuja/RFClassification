@@ -6,7 +6,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union
 
 import numpy as np
 from numpy import sum,isrealobj,sqrt
@@ -108,6 +108,9 @@ class ExtractionConfig:
     win_type: str
     spec_window: np.ndarray
     spec_interp_shape: Tuple[int, int]
+    use_gpu: bool = False
+    gpu_batch_size: int = 0
+    gpu_generator: Optional[Any] = None
 
 
 @dataclass
@@ -142,10 +145,27 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=SLOW_STEP_THRESHOLD,
         help="Emit a warning when an individual step exceeds this duration in seconds.",
     )
+    parser.add_argument(
+        "--use-gpu",
+        action="store_true",
+        help="Use CUDA-accelerated feature generation when available.",
+    )
+    parser.add_argument(
+        "--gpu-batch-size",
+        type=int,
+        default=segments_per_batch,
+        help="Number of segments to process concurrently on the GPU.",
+    )
+    parser.add_argument(
+        "--gpu-device",
+        type=str,
+        default=None,
+        help="CUDA device identifier to use (e.g., 'cuda:0').",
+    )
     return parser.parse_args(argv)
 
 
-def _compute_features(record: Dict[str, Any], cfg: ExtractionConfig) -> SegmentResult:
+def _compute_features_cpu(record: Dict[str, Any], cfg: ExtractionConfig) -> SegmentResult:
     durations = {"raw": 0.0, "psd": 0.0, "spec": 0.0}
     segment = record['segment']
     d_real = segment[cfg.i_hl]
@@ -195,6 +215,113 @@ def _compute_features(record: Dict[str, Any], cfg: ExtractionConfig) -> SegmentR
         raw=raw,
         durations=durations,
     )
+
+
+def _compute_features_gpu(
+    records: List[Dict[str, Any]],
+    cfg: ExtractionConfig,
+) -> List[SegmentResult]:
+    if not records:
+        return []
+    if cfg.gpu_generator is None:
+        raise RuntimeError("GPU feature generator has not been initialised")
+
+    generator = cfg.gpu_generator
+    batch_size = len(records)
+
+    raw_outputs: List[Optional[np.ndarray]] = [None] * batch_size
+    raw_durations: List[float] = [0.0] * batch_size
+    if cfg.raw_save:
+        for idx, record in enumerate(records):
+            start = time.perf_counter()
+            segment = record['segment']
+            t = np.arange(0, segment.shape[1])
+            f_high = interpolate.interp1d(t, segment[0])
+            f_low = interpolate.interp1d(t, segment[1])
+            tt = np.linspace(0, segment.shape[1] - 1, num=cfg.v_samp_len)
+            raw_outputs[idx] = np.stack((f_high(tt), f_low(tt)), axis=0).astype(np.float32, copy=False)
+            raw_durations[idx] = time.perf_counter() - start
+
+    need_frequency = any((cfg.pa_save, cfg.pi_save, cfg.sa_save, cfg.si_save))
+    segment_batch: Optional[np.ndarray] = None
+    if need_frequency:
+        segment_batch = np.stack(
+            [
+                record['segment'][cfg.i_hl].astype(np.float32, copy=False)
+                for record in records
+            ],
+            axis=0,
+        )
+
+    psd_batch: Optional[np.ndarray] = None
+    psd_duration = 0.0
+    if segment_batch is not None and (cfg.pa_save or cfg.pi_save):
+        psd_start = time.perf_counter()
+        _, psd_tensor = generator.welch(segment_batch)
+        generator.synchronize()
+        psd_duration = time.perf_counter() - psd_start
+        psd_batch = generator.to_numpy(psd_tensor).astype(np.float32, copy=False)
+
+    spec_batch: Optional[np.ndarray] = None
+    spec_duration = 0.0
+    if segment_batch is not None and (cfg.sa_save or cfg.si_save):
+        spec_start = time.perf_counter()
+        _, _, spec_tensor = generator.spectrogram(segment_batch)
+        generator.synchronize()
+        spec_duration = time.perf_counter() - spec_start
+        spec_batch = generator.to_numpy(spec_tensor).astype(np.float32, copy=False)
+
+    psd_per = psd_duration / batch_size if (cfg.pa_save or cfg.pi_save) and batch_size else 0.0
+    spec_per = spec_duration / batch_size if (cfg.sa_save or cfg.si_save) and batch_size else 0.0
+
+    results: List[SegmentResult] = []
+    for idx, record in enumerate(records):
+        psd_value: Optional[np.ndarray] = None
+        if psd_batch is not None:
+            psd_value = psd_batch[idx]
+
+        spec_image: Optional[np.ndarray] = None
+        spec_array: Optional[np.ndarray] = None
+        if spec_batch is not None:
+            spec_image = spec_batch[idx]
+            if cfg.sa_save:
+                spec_array = interpolate_2d(spec_image, cfg.spec_interp_shape).astype(
+                    np.float32, copy=False
+                )
+
+        results.append(
+            SegmentResult(
+                bi_label=record['bi_label'],
+                drone_label=record['four_label'],
+                model_label=record['ten_label'],
+                psd=psd_value,
+                spec_image=spec_image,
+                spec_array=spec_array,
+                raw=raw_outputs[idx],
+                durations={
+                    "raw": raw_durations[idx],
+                    "psd": psd_per,
+                    "spec": spec_per,
+                },
+            )
+        )
+
+    return results
+
+
+def _compute_features(
+    record_or_records: Union[Dict[str, Any], List[Dict[str, Any]]],
+    cfg: ExtractionConfig,
+) -> Union[SegmentResult, List[SegmentResult]]:
+    if cfg.use_gpu:
+        if not isinstance(record_or_records, list):
+            raise TypeError("GPU execution path expects batched records")
+        return _compute_features_gpu(record_or_records, cfg)
+
+    if isinstance(record_or_records, list):
+        raise TypeError("CPU execution path received a batch of records unexpectedly")
+
+    return _compute_features_cpu(record_or_records, cfg)
 
 
 def infer_saved_array_progress(folder_path: str, descriptor: str) -> Optional[Dict[str, Any]]:
@@ -338,7 +465,6 @@ def main(argv: Optional[List[str]] = None) -> None:
     max_workers = args.max_workers if args.max_workers and args.max_workers > 0 else max_workers_default
     if max_workers in (None, 0):
         max_workers = os.cpu_count() or 1
-    print(f"Using {max_workers} worker process(es) for feature extraction")
 
     cfg = ExtractionConfig(
         fs=fs,
@@ -355,6 +481,46 @@ def main(argv: Optional[List[str]] = None) -> None:
         spec_window=spec_han_window,
         spec_interp_shape=dim_px,
     )
+
+    if args.use_gpu:
+        try:
+            import cuda_feat_gen
+        except ImportError as exc:
+            print(
+                "GPU feature generation requested, but cuda_feat_gen could not be imported; "
+                f"falling back to CPU ({exc})"
+            )
+        else:
+            if not cuda_feat_gen.is_torch_available():
+                print("PyTorch is not installed; falling back to CPU feature generation")
+            elif not cuda_feat_gen.is_available():
+                print("CUDA device not available; falling back to CPU feature generation")
+            else:
+                try:
+                    gpu_generator = cuda_feat_gen.GPUFeatureGenerator(
+                        fs=cfg.fs,
+                        nperseg=cfg.n_per_seg,
+                        noverlap=cfg.n_overlap_spec,
+                        psd_window=cfg.win_type,
+                        spec_window=cfg.spec_window,
+                        device=args.gpu_device,
+                    )
+                except Exception as exc:
+                    print(
+                        "Unable to initialise the GPU feature generator; falling back to CPU "
+                        f"({exc})"
+                    )
+                else:
+                    cfg.use_gpu = True
+                    cfg.gpu_batch_size = max(1, args.gpu_batch_size)
+                    cfg.gpu_generator = gpu_generator
+                    print(
+                        "GPU feature generation enabled on device "
+                        f"{gpu_generator.device}; batching {cfg.gpu_batch_size} segments"
+                    )
+
+    if not cfg.use_gpu:
+        print(f"Using {max_workers} worker process(es) for feature extraction")
 
     def gather_resume_state() -> Optional[Dict[str, Any]]:
         candidates: List[Dict[str, Any]] = []
@@ -607,11 +773,19 @@ def main(argv: Optional[List[str]] = None) -> None:
             count_in_batch = 0
 
     compute_features = partial(_compute_features, cfg=cfg)
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        for batch in batched(segment_iterator, segments_per_batch):
+    if cfg.use_gpu:
+        gpu_batch_size = cfg.gpu_batch_size or segments_per_batch
+        for batch in batched(segment_iterator, gpu_batch_size):
             batch_start = count_in_batch
-            for idx, result in enumerate(executor.map(compute_features, batch)):
+            batch_results = compute_features(batch)
+            for idx, result in enumerate(batch_results):
                 process_segment(result, batch_start + idx)
+    else:
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            for batch in batched(segment_iterator, segments_per_batch):
+                batch_start = count_in_batch
+                for idx, result in enumerate(executor.map(compute_features, batch)):
+                    process_segment(result, batch_start + idx)
 
     if count_in_batch or BILABEL:
         segments_in_flush = count_in_batch

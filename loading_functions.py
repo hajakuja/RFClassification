@@ -412,11 +412,34 @@ def iter_dronerf_segments(
     high_dir = os.path.join(main_folder, "High")
     low_dir = os.path.join(main_folder, "Low")
 
-    high_freq_files = os.listdir(high_dir)
-    low_freq_files = os.listdir(low_dir)
+    high_freq_files = sorted(os.listdir(high_dir))
+    low_freq_files = sorted(os.listdir(low_dir))
 
-    high_freq_files.sort()
-    low_freq_files.sort()
+    def _normalise_name(filename):
+        stem, _ = os.path.splitext(filename)
+        stem = stem.replace("H_", "_").replace("L_", "_")
+        return stem
+
+    high_map = {_normalise_name(f): f for f in high_freq_files}
+    low_map = {_normalise_name(f): f for f in low_freq_files}
+
+    matched_keys = sorted(set(high_map.keys()) & set(low_map.keys()))
+    skipped_high = sorted(set(high_map.keys()) - set(low_map.keys()))
+    skipped_low = sorted(set(low_map.keys()) - set(high_map.keys()))
+
+    if not matched_keys:
+        raise ValueError("No matching High/Low file pairs found in the provided directories")
+
+    if skipped_high:
+        preview = ", ".join(high_map[key] for key in skipped_high[:3])
+        if len(skipped_high) > 3:
+            preview += ", ..."
+        print(f"Skipping {len(skipped_high)} High-only files: {preview}")
+    if skipped_low:
+        preview = ", ".join(low_map[key] for key in skipped_low[:3])
+        if len(skipped_low) > 3:
+            preview += ", ..."
+        print(f"Skipping {len(skipped_low)} Low-only files: {preview}")
 
     fs = 40e6  # 40 MHz
     len_seg = int(t_seg / 1e3 * fs)
@@ -425,10 +448,9 @@ def iter_dronerf_segments(
 
     skipped_segments = 0
 
-    if len(high_freq_files) != len(low_freq_files):
-        raise ValueError("High/Low directories contain a different number of files")
-
-    for file_index, (high_file, low_file) in enumerate(zip(high_freq_files, low_freq_files)):
+    for file_index, key in enumerate(matched_keys):
+        high_file = high_map[key]
+        low_file = low_map[key]
         high_path = os.path.join(high_dir, high_file)
         low_path = os.path.join(low_dir, low_file)
 
@@ -442,9 +464,11 @@ def iter_dronerf_segments(
 
         for chunk_high, chunk_low in zip_longest(high_iter, low_iter):
             if chunk_high is None or chunk_low is None:
-                raise ValueError(
-                    f"Mismatched chunk counts for High/Low files: {high_file}, {low_file}"
+                print(
+                    "Skipping trailing unmatched chunk in files "
+                    f"{high_file}, {low_file}"
                 )
+                break
 
             high_values = chunk_high.values.reshape(-1).astype(dtype, copy=False)
             low_values = chunk_low.values.reshape(-1).astype(dtype, copy=False)
