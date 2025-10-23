@@ -130,3 +130,5 @@ Model Performance (accuracy) for different NFFT and sample lengths
 |-------|------------|------------|-------------|
 | NFFT=1024 | 0.769       | 0.836       | 0.894        |
 
+# Gargoyle Systems Docs
+- So far we've mostly fixed issues with DroneRF feature extraction, we've added the abilityto stream the data and not load it fully into RAM before processing. 

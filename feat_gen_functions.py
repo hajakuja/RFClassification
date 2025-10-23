@@ -7,14 +7,27 @@ from helper_functions import *
 
 ## DRONEDETECT - DATA SAVING FUNCTIONS
 def interpolate_2d(Sxx_in, output_size):
-    x = np.linspace(0, 1, Sxx_in.shape[0])
-    y = np.linspace(0, 1, Sxx_in.shape[1])
-    f = interpolate.interp2d(y, x, Sxx_in, kind='linear')
-    
+    """Resize a 2D array to ``output_size`` using bilinear interpolation.
+
+    Replaces deprecated ``scipy.interpolate.interp2d`` with
+    ``scipy.interpolate.RegularGridInterpolator`` on a normalized regular grid.
+    """
+    # Original grid (normalized 0..1 along each axis)
+    x = np.linspace(0, 1, Sxx_in.shape[0])  # rows
+    y = np.linspace(0, 1, Sxx_in.shape[1])  # cols
+
+    # Interpolator over the regular grid (bilinear)
+    interp_fn = interpolate.RegularGridInterpolator(
+        (x, y), Sxx_in, method='linear', bounds_error=False, fill_value=None
+    )
+
+    # Target grid
     x2 = np.linspace(0, 1, output_size[0])
     y2 = np.linspace(0, 1, output_size[1])
-    arr2 = f(y2, x2)
-    
+    X2, Y2 = np.meshgrid(x2, y2, indexing='ij')  # shape (rows, cols)
+
+    # Evaluate and return with desired shape
+    arr2 = interp_fn(np.stack([X2, Y2], axis=-1))
     return arr2
 
 # save function to save image to file
